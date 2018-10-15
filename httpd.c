@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/sendfile.h>
 #include <pthread.h>
+#include "threadpool/threadpool.h"
 
 #define MAX 1024
 #define MAIN_PAGE "index.html"
@@ -173,7 +174,7 @@ int exe_cgi(int sock, char *method, char *path, char *query_string)
 	}else{
 		do{
 			getLine(sock, line, sizeof(line));
-			//Content-Length: 23
+			//Content-Length: 23 
 			if(strncmp(line, "Content-Length: ", 16) == 0){
 				content_length = atoi(line+16);
 			}
@@ -364,21 +365,61 @@ int main(int argc, char *argv[])
 	}
 	signal(SIGPIPE, SIG_IGN);
 	int listen_sock = startup(atoi(argv[1]));
-
+	
+	int epoll_fd = epoll_create(10);
+	if (epoll_fd < 0) {
+		perror("epoll_create");
+		return 1;
+	}
+	struct epoll_event event;
+	event.events = EPOLLIN;
+	event.data.fd = listen_sock;
+	
+	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_sock, &event);
+	if (ret < 0) {
+		perror("epoll_ctl");
+		return 1;
+	}
+	threadpool_t pool;
+	threadpool_init(&pool,4);
 	for( ; ; ){
-		struct sockaddr_in client;
-		socklen_t len = sizeof(client);
-		int sock = accept(listen_sock, (struct sockaddr*)&client, &len);
-		if(sock < 0){
-			perror("accept");
+		struct epoll_event events[10];
+		int size = epoll_wait(epoll_fd, events, sizeof(events) / sizeof(events[0]), -1);
+		if (size < 0) {
+			perror("epoll_wait");
 			continue;
 		}
+		for(int i = 0; i < size; ++i){
+			//套接字描述符改变_处理连接请求
+            if(events[i].data.fd == listen_sock){
+ 
+				struct sockaddr_in client;
+				socklen_t len = sizeof(client);
+				int sock = accept(listen_sock, (struct sockaddr*)&client, &len);
+				if(sock < 0){
+					perror("accept");
+					continue;
+				}
+				struct epoll_event ev;
+				ev.data.fd = connect_fd;
+				ev.events = EPOLLIN;
+				int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connect_fd, &ev);
+			}
+			//有读事件发生
+            else if(events[i].events & EPOLLIN){
 
-		pthread_t tid;
-		pthread_create(&tid, NULL, handlerRequest, (void *)sock);
-		pthread_detach(tid);
+				struct sockaddr_in client;
+				socklen_t len = sizeof(client);
+				int sock = accept(listen_sock, (struct sockaddr*)&client, &len);
+				if(sock < 0){
+					perror("accept");
+					continue;
+				}
+				threadpool_add(&pool, handlerRequest, (void *)sock);//添加至线程池处理
+			}
 	}
-
+	threadpool_destroy(&pool);
+	close(listen_sock);
 	return 0;
 }
 
