@@ -1,9 +1,12 @@
 ﻿#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <assert.h>
 #include <string.h>
+
 #include <fcntl.h>
 #include <signal.h>
+
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
@@ -13,10 +16,10 @@
 
 #include <sys/epoll.h>
 #include <pthread.h>
-#include "threadpool/threadpool.h"
+#include "./threadpool/threadpool.h"
 
 #define MAX 1024
-#define MAX_EVENT_NUMBER 1024
+#define MAX_EVENT_NUMBER 10
 #define MAIN_PAGE "index.html"
 #define PAGE_404 "wwwroot/404.html"
 
@@ -28,10 +31,10 @@ static void usage(const char *proc)
 int startup(int port)
 {
 	int listenfd = socket(AF_INET, SOCK_STREAM, 0);
-	assert(listenfd >= 0)
+	assert(listenfd >= 0);
 
 	int opt = 1;
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
 	struct sockaddr_in local;
 	bzero(&local, sizeof(local));
@@ -40,16 +43,16 @@ int startup(int port)
 	local.sin_port = htons(port);
 	
 	int ret = 0;
-	ret = bind(sock, (struct sockaddr*)&local, sizeof(local));
+	ret = bind(listenfd, (struct sockaddr*)&local, sizeof(local));
 	assert(ret != -1);
 
 	ret = listen(listenfd, 5);
 	assert(ret != -1);
 	
-	return sock;
+	return listenfd;
 }
 //set socketfd noblock
-int setnoblocking(int fd)
+int setnonblocking(int fd)
 {
 	int old_option = fcntl(fd, F_GETFL);
 	int new_option = old_option | O_NONBLOCK;
@@ -60,7 +63,7 @@ int setnoblocking(int fd)
 //add the event of EPOLLIN to epoll_events
 void addfd(int epollfd, int fd)
 {
-	epoll_event event;
+	struct epoll_event event;
 	event.data.fd  = fd;
 	event.events = EPOLLIN;
 	/*event.events |= EPOLLET*/
@@ -398,22 +401,27 @@ int main(int argc, char *argv[])
 			perror("epoll_wait");
 			break;
 		}
-		for(int i = 0; i < size; ++i){
-			
-            if(events[i].data.fd == listen_sock){
+		int i = 0;
+		for( ; i < size; ++i)
+		{	
+            if(events[i].data.fd == listen_sock)
+			{
 				struct sockaddr_in client;
 				socklen_t len = sizeof(client);
 				int connfd = accept(listen_sock, (struct sockaddr*)&client, &len);
 		
-				addfd(epollfd, connfd);
+				addfd(epoll_fd, connfd);
 			}
-            else if(events[i].events & EPOLLIN){
+            else if(events[i].events & EPOLLIN)
+			{
 				/* LT work */
 				threadpool_add(&pool, handlerRequest, (void *)&events[i].data.fd );
 			}
+		}
 	}
 	threadpool_destroy(&pool);
 	close(listen_sock);
+
 	return 0;
 }
 

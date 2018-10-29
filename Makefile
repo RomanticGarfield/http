@@ -4,7 +4,7 @@ bin=httpd
 LDFLAGS=-lpthread
 
 .PHONY:all
-all: $(bin) cgi
+all: $(bin) cgi threadpool
 
 $(bin):$(src)
 	$(cc) -o $@ $^ $(LDFLAGS)
@@ -12,6 +12,7 @@ $(bin):$(src)
 cgi:
 	cd wwwroot/cgi;make clean;make;cd -
 	cd sql_connect/;make clean;make;cd -
+	cd threadpool;make clean;make;cd -
 
 .PHONY:clean
 clean:
