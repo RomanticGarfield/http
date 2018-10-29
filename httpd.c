@@ -1,4 +1,4 @@
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -10,10 +10,13 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/sendfile.h>
+
+#include <sys/epoll.h>
 #include <pthread.h>
 #include "threadpool/threadpool.h"
 
 #define MAX 1024
+#define MAX_EVENT_NUMBER 1024
 #define MAIN_PAGE "index.html"
 #define PAGE_404 "wwwroot/404.html"
 
@@ -21,34 +24,49 @@ static void usage(const char *proc)
 {
 	printf("Usage: %s port\n", proc);
 }
-	
+//init a socketfd,include create, bind and listen it 
 int startup(int port)
 {
-	int sock = socket(AF_INET, SOCK_STREAM, 0);
-	if(sock < 0){
-		perror("socket");
-		exit(2);
-	}
+	int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+	assert(listenfd >= 0)
 
 	int opt = 1;
 	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
 	struct sockaddr_in local;
+	bzero(&local, sizeof(local));
 	local.sin_family = AF_INET;
 	local.sin_addr.s_addr = htonl(INADDR_ANY);
 	local.sin_port = htons(port);
+	
+	int ret = 0;
+	ret = bind(sock, (struct sockaddr*)&local, sizeof(local));
+	assert(ret != -1);
 
-	if(bind(sock, (struct sockaddr*)&local, sizeof(local)) < 0){
-		perror("bind");
-		exit(3);
-	}
-
-	if(listen(sock, 5) < 0){
-		perror("listen");
-		exit(4);
-	}
-
+	ret = listen(listenfd, 5);
+	assert(ret != -1);
+	
 	return sock;
+}
+//set socketfd noblock
+int setnoblocking(int fd)
+{
+	int old_option = fcntl(fd, F_GETFL);
+	int new_option = old_option | O_NONBLOCK;
+	fcntl(fd, F_SETFL, new_option);
+	
+	return old_option;
+}
+//add the event of EPOLLIN to epoll_events
+void addfd(int epollfd, int fd)
+{
+	epoll_event event;
+	event.data.fd  = fd;
+	event.events = EPOLLIN;
+	/*event.events |= EPOLLET*/
+	
+	epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
+	setnonblocking(fd);
 }
 
 void echo_404(int sock)
@@ -361,61 +379,37 @@ int main(int argc, char *argv[])
 	{
 		usage(argv[0]);
 		return 1;
-
 	}
 	signal(SIGPIPE, SIG_IGN);
+	
 	int listen_sock = startup(atoi(argv[1]));
 	
 	int epoll_fd = epoll_create(10);
-	if (epoll_fd < 0) {
-		perror("epoll_create");
-		return 1;
-	}
-	struct epoll_event event;
-	event.events = EPOLLIN;
-	event.data.fd = listen_sock;
+	assert(epoll_fd != -1);
 	
-	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_sock, &event);
-	if (ret < 0) {
-		perror("epoll_ctl");
-		return 1;
-	}
+	addfd(epoll_fd, listen_sock);
+	
 	threadpool_t pool;
 	threadpool_init(&pool,4);
 	for( ; ; ){
-		struct epoll_event events[10];
-		int size = epoll_wait(epoll_fd, events, sizeof(events) / sizeof(events[0]), -1);
+		struct epoll_event events[MAX_EVENT_NUMBER];
+		int size = epoll_wait(epoll_fd, events, MAX_EVENT_NUMBER, -1);
 		if (size < 0) {
 			perror("epoll_wait");
-			continue;
+			break;
 		}
 		for(int i = 0; i < size; ++i){
-			//套接字描述符改变_处理连接请求
+			
             if(events[i].data.fd == listen_sock){
- 
 				struct sockaddr_in client;
 				socklen_t len = sizeof(client);
-				int sock = accept(listen_sock, (struct sockaddr*)&client, &len);
-				if(sock < 0){
-					perror("accept");
-					continue;
-				}
-				struct epoll_event ev;
-				ev.data.fd = connect_fd;
-				ev.events = EPOLLIN;
-				int ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connect_fd, &ev);
+				int connfd = accept(listen_sock, (struct sockaddr*)&client, &len);
+		
+				addfd(epollfd, connfd);
 			}
-			//有读事件发生
             else if(events[i].events & EPOLLIN){
-
-				struct sockaddr_in client;
-				socklen_t len = sizeof(client);
-				int sock = accept(listen_sock, (struct sockaddr*)&client, &len);
-				if(sock < 0){
-					perror("accept");
-					continue;
-				}
-				threadpool_add(&pool, handlerRequest, (void *)sock);//添加至线程池处理
+				/* LT work */
+				threadpool_add(&pool, handlerRequest, (void *)&events[i].data.fd );
 			}
 	}
 	threadpool_destroy(&pool);
